@@ -1,0 +1,160 @@
+---
+title: "ML Prediction Assignment"
+author: "Russell Greene"
+date: "July 19, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(caret)
+library(doMC)
+registerDoMC(cores = 4)
+```
+
+## Executive Summary
+
+In this assignment, the Weight Lifting Exercise Dataset was analyzed.  I fit three different machine learning models using three different techniques.  The first technique I used a simple classification tree made using recursive partitioning for classification.  It had a validation accuracy of **0.749**.  The second method was gradient boosting which produces a prediction model in the form of an ensemble of weak prediction models, typically decision trees. It builds the model in a stage-wise fashion like other boosting methods do, and it generalizes them by allowing optimization of an arbitrary differentiable loss function.  The classification tree built using gradient boosting had a training accuracy of **0.958** and an accuracy of **0.964** on the validation set.  The third technique was random forests which constructs a multitude of decision trees at training time and outputs the class that is the mode of the classes of the individual trees. The random forest model had a training accuracy of **0.99** and an accuracy of **0.99** on the validation set.  
+
+The true test of the random forest model was on the Course Project Prediction Quiz where the model earned a 100% (20 / 20 correct).  The 99% accuracy on the validation data and the 100% match on the prediction quiz suggests that the random forest model was not overfit on the training data.
+
+## Preparing Data Frame for Analysis
+
+The training and test cvs files were downloaded and loaded into dataframes. 
+
+Download data and load to dataframe:
+```{r getdata}
+training_file <- '/home/rgreene/Coursera/Data_Science/Machine_Learning/pml-training.csv'
+testing_file <- '/home/rgreene/Coursera/Data_Science/Machine_Learning/pml-testing.csv'
+if (!file.exists(training_file))
+  download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', training_file)
+if (!file.exists(testing_file))
+  download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv', testing_file)
+
+training <- read.csv(training_file)
+testing <- read.csv(testing_file)
+```
+
+This data needed a fair bit of massaging before I was able to train machine learning models on it.  The first step was to remove the first 7 columns from the dataframe as these columns don't reflect data from the sensors.
+
+After that I converted all factor columns except for the response (which is the last column of the training data) to numeric types.  This is because R has an annoying habit of turning numeric columns with only a handful of unique numbers into factors.  This turns a continuous variable into a discrete variable drastically reducing the accuracy of the algorithm.
+
+The next step was to remove any missing values (denoted by NA) by the column mean.  The last step for the dataframe preparation was to remove any columns that still had NAs (this means that the mean was NA which means that the entire column was missing valid values).
+
+``` {r eda 1}
+options(warn = -1)
+drop_cols = c('X', 'user_name', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window', 'num_window')
+training <- training[,!(colnames(training)) %in% drop_cols]
+
+ncoli <- ncol(training)
+ncoli <- ncoli - 1
+for (i in 1:ncoli) {
+    if (class(training[,i]) == "factor") {
+     training[,i] = as.numeric(as.character(training[,i])) 
+    }
+    training[is.na(training[,i]), i] <- mean(training[,i], na.rm=TRUE)
+}
+
+# Remove any columns will NA which means that there were no valid values here since all previous missing values were replaced  by mean (this means any remaining NAs had a mean of NA)
+training <-training[,colSums(is.na(training))==0]
+```
+
+Before doing any exploritory data analysis I sub-divide the training set into a training and validation set so that I can try multiple fits before moving to my test set.
+
+``` {r eda 2}
+set.seed(123456)
+inTrain <- createDataPartition(y = training$classe, p = 0.8, list = FALSE)
+trainSet <- training[inTrain, ]
+validationSet <- training[-inTrain, ]
+```
+
+## Exploratory Data Analysis
+
+This has reduced the set from 160 columns down to 147 predictor variables with 15699 rows.  It's hard to graphically represent this dataset as there are over a hundred variables.
+
+``` {r eda 3}
+print(dim(trainSet))
+```
+
+## Building Machine Learning Models
+
+In this anaylsis I build three machine learning models.  The first one is the simplest which is a classification tree made using recursive partitioning for classification.  The advantage to the rpart model is that it is easy to both understand and visualize.  The second technique I used was gradient boosting which produces a prediction model in the form of an ensemble of weak prediction models, typically decision trees. It builds the model in a stage-wise fashion like other boosting methods do, and it generalizes them by allowing optimization of an arbitrary differentiable loss function.  The third technique was random forests which constructs a multitude of decision trees at training time and outputs the class that is the mode of the classes of the individual trees.  I used the doMC rpackage which let me parallelize the random forest and gradient boosting algorithms taking advantage of all 4 cores on my machine.
+
+``` {r ml 1, cache = TRUE}
+options(warn = -1)
+set.seed(1234)
+rpart_model <- rpart(classe ~ ., data = trainSet)
+
+set.seed(1234)
+gb_model <- train(classe ~ ., data=trainSet, method="gbm", verbose=FALSE)
+
+set.seed(1234)
+rf_model <- train(classe ~ ., data = trainSet, method = "rf", ntree=100, importance=TRUE)
+```
+
+## Model Evaluation
+
+The nice thing with the classification tree is that it is very straightforward.  As seen below we can graphically display the classification tree which allows us to start to build an intuition as to the most important sensors in determining the class of exercise.  However, the validation set accuracy of the single tree model is only **0.749** on the validation data which isn't really great.
+
+``` {r ml 2, message=FALSE}
+options(warn = -1)
+prp(rpart_model)		
+rpart_predicted_data <- predict(rpart_model, validationSet, type="class")
+postResample(rpart_predicted_data, validationSet$classe)
+```
+
+The second model fit was a gradient boosting model.  This is an ensamble model which is constructed based on many different decision trees.  As you can see below, the validation set accuracy is **0.965** which is a lot better than using the single decision tree.
+
+``` {r ml 3, message=FALSE}
+gb_predicted_data <- predict(gb_model, validationSet)
+postResample(gb_predicted_data, validationSet$classe)
+```
+
+To see if I could improve results even further, I tried a random forest classifier.  In this technique I built 100 decisions trees and took the most common tree to determine the model.  With the random forest, I was able to achieve a validation set accuracy of **0.992**!
+
+``` {r ml 4, message=FALSE}
+rf_predicted_data <- predict(rf_model, validationSet)
+postResample(rf_predicted_data, validationSet$classe)
+```
+
+One of the nice features of random forests in R is that it is possible to determine the most important variables.  Below shows the most important variables in building this classifier.
+
+``` {r ml 5}
+varImp(rf_model)
+```
+
+## Conclusion
+
+The random forest predictor yields the best performance on the the validation set.  It is now finally time to open up the testing set.  However, before we can use the testing set we have to pre-process the data (in similar fashion to how we pre-processed the training data).  In the code below I drop the columns without sensor data.  I also convert any factor columns to numeric fields and fill in the remaining columns with NAs (which at this point mean there are NAs in the entire column) with 0.  Unlike the training data, I don't drop these columns as my fitted model might be looking for these fields.   
+
+``` {r conclusion 1, message=FALSE}
+options(warn = -1)
+drop_cols = c('X', 'user_name', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window', 'num_window')
+testing <- testing[,!(colnames(testing)) %in% drop_cols]
+
+for (i in 1:ncol(testing)) {
+    if (class(testing[,i]) == "factor") {
+     testing[,i] = as.numeric(as.character(testing[,i])) 
+    }
+    testing[is.na(testing[,i]), i] <- mean(testing[,i], na.rm=TRUE)
+}
+
+# Any columns with NA which means that there were no valid values here since all previous missing values were replaced by mean (this means any remaining NAs had a mean of NA).  Replace with 0 since this is testing set.
+for (i in 1:ncol(testing)) {
+  testing[is.na(testing[,i]), i] <- 0
+}
+
+```
+
+Seen below, my random forest predictor makes the follownig predictions for the first 20 classes.
+
+``` {r conclusion 2}
+options(warn = -1)
+testPrediction <- predict(rf_model, testing)
+print(rbind(testing[1:20, 160], as.character(testPrediction)))
+```
+
+The true test of the random forest model was on the Course Project Prediction Quiz where the model earned a 100% (20 / 20 correct).  The 99% accuracy on the validation data and the 100% match on the prediction quiz suggests that the random forest model was not overfit on the training data.
